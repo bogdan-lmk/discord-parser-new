@@ -601,10 +601,9 @@ class TelegramService:
                 self.logger.error("Discord service missing 'monitored_announcement_channels' attribute")
                 self.discord_service.monitored_announcement_channels = set()  # Создаем пустой set как fallback
             
-            # ПРОДОЛЖАЕМ С ПОЛНОЙ ЛОГИКОЙ ОТОБРАЖЕНИЯ СПИСКА
             
             # Pagination settings
-            servers_per_page = 8
+            servers_per_page = 15
             server_list = list(servers.keys())
             total_servers = len(server_list)
             total_pages = (total_servers + servers_per_page - 1) // servers_per_page

@@ -80,82 +80,35 @@ class DiscordService:
                 self.logger.error("Error in message callback", error=str(e))
     
     def _is_announcement_channel(self, channel_name: str, channel_type: Optional[int] = None, category_name: Optional[str] = None) -> bool:
-        """Улучшенная проверка announcement каналов с расширенными ключевыми словами"""
+        """Проверка что канал является announcement по названию, типу и категории"""
+        # Проверка официального типа announcement канала
+            
+        # Очистка названия канала и категории от emoji и лишних символов
+        clean_channel = ''.join([c for c in channel_name if c.isalpha() or c.isspace()])
+        clean_channel = ' '.join(clean_channel.split()).lower()
         
-        # 1. ОФИЦИАЛЬНЫЙ тип announcement канала (приоритет)
-        if channel_type == 5:  # GUILD_ANNOUNCEMENT
-            self.logger.info(f"✅ Official announcement channel detected: {channel_name} (type 5)")
-            return True
+        clean_category = ''
+        if category_name:
+            clean_category = ''.join([c for c in category_name if c.isalpha() or c.isspace()])
+            clean_category = ' '.join(clean_category.split()).lower()
         
-        # 2. Очистка названия от emoji, символов и нормализация
-        def clean_text(text):
-            if not text:
-                return ""
-            # Удаляем все НЕ буквенные символы (emoji, спец. символы)
-            cleaned = ''.join(c.lower() if c.isalpha() else ' ' for c in text)
-            # Убираем лишние пробелы и возвращаем
-            return ' '.join(cleaned.split())
-        
-        clean_channel = clean_text(channel_name)
-        clean_category = clean_text(category_name) if category_name else ""
-        
-        # 3. РАСШИРЕННЫЙ список ключевых слов (английский + популярные варианты)
+        # Ключевые слова для поиска в названиях каналов и категорий
         announcement_keywords = [
-            # Основные английские
-            'announce', 'announcement', 'announcements', 
-            'news', 'updates', 'update',
-            'info', 'information', 'general',
-            
-            # Варианты написания
-            'anouncement', 'anouncements',  # частые опечатки
-            'annoucement', 'annoucements',
-            
-            # Сокращения и альтернативы
-            'ann', 'anns', 'announce',
-            'big announcement', 'big announcements',
-            'server announcement', 'server announcements',
-            'guild announcement', 'guild announcements',
-            
-            # Популярные форматы в Discord
-            'general announcement', 'general announcements',
-            'important', 'notices', 'notice',
-            'alerts', 'alert',
-            
-            # Русские варианты (если есть русские серверы)
-            'объявления', 'объявление', 'новости', 'новость',
-            'анонсы', 'анонс', 'инфо', 'информация',
-            
-            # Специальные форматы
-            'updates and announcements',
-            'news and updates',
-            'server news',
-            'community announcements'
+            'announce', 'updates', 'big-announcements',
+            'news', 'announcements', 'announcement'
         ]
         
-        # Добавляем настроенные ключевые слова из конфига
-        all_keywords = announcement_keywords + [kw.lower() for kw in self.settings.channel_keywords]
-        
-        # 4. Проверка ТОЧНОГО совпадения с ключевыми словами
-        for keyword in all_keywords:
-            # ТОЧНОЕ совпадение слова (не подстрока)
-            if keyword in clean_channel.split():
-                self.logger.info(f"✅ Announcement channel by exact keyword '{keyword}': {channel_name}")
-                return True
-            
-            # Проверяем категорию
-            if clean_category and keyword in clean_category.split():
-                self.logger.info(f"✅ Announcement channel by category keyword '{keyword}': {channel_name} (category: {category_name})")
-                return True
-        
-        # 5. Проверка СОДЕРЖАНИЯ ключевых слов (для составных названий)
-        priority_keywords = ['announcement', 'announcements', 'news', 'updates', 'general']
-        for keyword in priority_keywords:
+        # Проверка по ключевым словам в названии канала
+        for keyword in announcement_keywords + self.settings.channel_keywords:
             if keyword in clean_channel:
-                self.logger.info(f"✅ Announcement channel by contains '{keyword}': {channel_name}")
                 return True
-        
-        # 6. НЕ является announcement каналом
-        self.logger.debug(f"❌ Not announcement channel: {channel_name} (cleaned: '{clean_channel}')")
+                
+        # Проверка по ключевым словам в названии категории
+        if clean_category:
+            for keyword in announcement_keywords + self.settings.channel_keywords:
+                if keyword in clean_category:
+                    return True
+                    
         return False
     
     async def initialize(self) -> bool:
@@ -503,7 +456,7 @@ class DiscordService:
                              server_name: str, 
                              channel_id: str, 
                              limit: int = 2) -> List[DiscordMessage]:
-        """Get recent messages from channel - СТРОГО соблюдаем лимит"""
+        """Get recent messages from channel"""
         if server_name not in self.servers:
             self.logger.warning("Server not found", server=server_name)
             return []
@@ -535,10 +488,7 @@ class DiscordService:
             return []
 
         messages = []
-        # ИСПРАВЛЕНИЕ: СТРОГО ограничиваем лимит
-        actual_limit = min(max(1, limit), 5)  # От 1 до 5 максимум
-        
-        self.logger.info(f"🔄 Fetching messages with STRICT limit: {actual_limit} for {channel.channel_name}")
+        actual_limit = min(limit, 20)  # Increased limit for better message retrieval
         
         for attempt in range(self.max_retries):
             try:
@@ -612,17 +562,12 @@ class DiscordService:
                         channel.last_message_time = latest_message.timestamp
                     
                     channel_type = "announcement" if self._is_announcement_channel(channel.channel_name) else "regular"
-                    self.logger.info(f"✅ Retrieved messages with STRICT limit", 
-                            server=server_name,
-                            channel=channel.channel_name,
-                            channel_type=channel_type,
-                            requested_limit=limit,
-                            actual_limit=actual_limit,
-                            received_count=len(messages),
-                            enforced_limit=True)
-                    
-                    # Логируем соблюдение лимитов
-                    self._log_message_limits("get_recent_messages", limit, actual_limit, len(messages))
+                    self.logger.debug("Retrieved messages from monitored channel", 
+                                server=server_name,
+                                channel=channel.channel_name,
+                                channel_type=channel_type,
+                                message_count=len(messages),
+                                limit_used=actual_limit)
                     
                     return sorted(messages, key=lambda x: x.timestamp)
                     
@@ -643,8 +588,8 @@ class DiscordService:
     async def get_new_messages_only(self, 
                                   server_name: str, 
                                   channel_id: str, 
-                                  limit: int = 100) -> List[DiscordMessage]:
-        """НОВОЕ: Get only NEW messages since last poll - БЕЗ жестких лимитов для real-time"""
+                                  limit: int = 10) -> List[DiscordMessage]:
+        """НОВОЕ: Get only NEW messages since last poll (для polling без дублирования)"""
         if server_name not in self.servers:
             return []
 
@@ -668,8 +613,7 @@ class DiscordService:
         last_seen_message_id = self.last_seen_message_per_channel.get(channel_id)
         
         messages = []
-        # ИСПРАВЛЕНИЕ: Для real-time сообщений используем больший лимит
-        actual_limit = min(limit, 100)  # До 100 новых сообщений
+        actual_limit = min(limit, 20)
         
         try:
             await self.rate_limiter.wait_if_needed(f"new_messages_{channel_id}")
@@ -887,14 +831,12 @@ class DiscordService:
                 channel_info = self.servers[server_name].channels[channel_id]
                 channel_type = "announcement" if self._is_announcement_channel(channel_info.channel_name) else "regular"
                 
-                self.logger.info("Found NEW real-time messages (NO LIMIT)", 
+                self.logger.info("Found NEW messages during polling", 
                                 server=server_name,
                                 channel_name=channel_info.channel_name,
                                 channel_type=channel_type,
                                 channel_id=channel_id,
-                                new_message_count=len(new_messages),
-                                real_time_mode=True,
-                                limit_enforced=False)
+                                new_message_count=len(new_messages))
                 
                 # Trigger callbacks for each NEW message
                 for message in new_messages:
@@ -1064,21 +1006,6 @@ class DiscordService:
         
         self.logger.info("Discord service cleaned up (new messages only polling)")
     
-    def _log_message_limits(self, context: str, requested: int, actual: int, received: int):
-        """Логирование соблюдения лимитов сообщений"""
-        if received > actual:
-            self.logger.warning(f"🚨 LIMIT VIOLATION in {context}",
-                              requested=requested,
-                              actual_limit=actual, 
-                              received=received,
-                              violation=True)
-        else:
-            self.logger.info(f"✅ Limits respected in {context}",
-                           requested=requested,
-                           actual_limit=actual,
-                           received=received,
-                           compliant=True)
-
     def notify_channel_removed(self, server_name: str, channel_id: str, channel_name: str) -> bool:
         """Уведомление об удалении канала из мониторинга"""
         try:
