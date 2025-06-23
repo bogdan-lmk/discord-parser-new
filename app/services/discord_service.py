@@ -95,7 +95,7 @@ class DiscordService:
         # Ключевые слова для поиска в названиях каналов и категорий
         announcement_keywords = [
             'announce', 'updates', 'big-announcements',
-            'news', 'announcements', 'announcement'
+            'announcements', 'announcement'
         ]
         
         # Проверка по ключевым словам в названии канала
@@ -151,8 +151,8 @@ class DiscordService:
             self.logger.error("No valid Discord tokens available")
             return False
         
-        # Discover announcement channels
-        await self._discover_announcement_channels_only()
+        # Discover all channels
+        await self._discover_all_servers()
         
         self._initialization_done = True
         self.logger.info("Discord service initialized with anti-duplication", 
@@ -239,12 +239,12 @@ class DiscordService:
         
         return False
     
-    async def _discover_announcement_channels_only(self) -> None:
-        """Discover announcement channels"""
+    async def _discover_all_servers(self) -> None:
+        """ИСПРАВЛЕНО: Discover ALL servers, даже без announcement каналов"""
         if not self.sessions:
             return
         
-        self.logger.info("🔍 Discovering ANNOUNCEMENT channels only...")
+        self.logger.info("🔍 Discovering ALL servers (including non-announcement)...")
         
         for attempt in range(self.max_retries):
             try:
@@ -271,15 +271,32 @@ class DiscordService:
                     self.logger.info("Discovered guilds", count=len(guilds))
                     
                     # Process each guild
+                    servers_processed = 0
+                    servers_with_announcement = 0
+                    servers_without_announcement = 0
+                    
                     for guild in guilds[:self.settings.max_servers]:
                         try:
-                            await self._process_guild_announcement_channels_only(session, guild)
+                            has_announcement = await self._process_guild_all_channels(session, guild)
+                            servers_processed += 1
+                            
+                            if has_announcement:
+                                servers_with_announcement += 1
+                            else:
+                                servers_without_announcement += 1
+                                
                         except Exception as e:
                             self.logger.error("Failed to process guild", 
                                             guild_id=guild.get('id'),
                                             guild_name=guild.get('name'),
                                             error=str(e))
                             continue
+                    
+                    self.logger.info("🎯 Server discovery complete", 
+                                total_processed=servers_processed,
+                                with_announcement=servers_with_announcement,
+                                without_announcement=servers_without_announcement,
+                                total_added=len(self.servers))
                     
                     return
                     
@@ -293,8 +310,8 @@ class DiscordService:
         
         self.logger.warning("Server discovery completed with some failures")
     
-    async def _process_guild_announcement_channels_only(self, session: aiohttp.ClientSession, guild_data: dict) -> None:
-        """Process guild to find announcement channels"""
+    async def _process_guild_all_channels(self, session: aiohttp.ClientSession, guild_data: dict) -> bool:
+        """ИСПРАВЛЕНО: Process guild - добавляет ВСЕ серверы, возвращает True если есть announcement каналы"""
         guild_id = guild_data['id']
         guild_name = guild_data['name']
         
@@ -310,31 +327,33 @@ class DiscordService:
                     
                     if response.status != 200:
                         if response.status in [401, 403]:
-                            return
+                            return False
                         
                         if attempt < self.max_retries - 1:
                             await asyncio.sleep(self.base_delay * (2 ** attempt))
                             continue
-                        return
+                        return False
                     
                     channels = await response.json()
                     
-                    # Create server info
+                    # Create server info ВСЕГДА
                     server_info = ServerInfo(
                         server_name=guild_name,
                         guild_id=guild_id,
                         max_channels=self.settings.max_channels_per_server
                     )
                     
-                    # Find ONLY announcement channels
+                    # Find ALL channels and announcement channels
+                    all_channels = self._get_accessible_channels(channels)
                     announcement_channels = self._find_announcement_channels_only(channels)
                     
-                    if not announcement_channels:
-                        self.logger.info("No announcement channels found", guild=guild_name)
-                        return
+                    has_announcement_channels = len(announcement_channels) > 0
                     
-                    # Add ONLY announcement channels to server
-                    for channel in announcement_channels[:self.settings.max_channels_per_server]:
+                    # Add ALL accessible channels to server (not just announcement)
+                    channels_added = 0
+                    announcement_channels_added = 0
+                    
+                    for channel in all_channels[:self.settings.max_channels_per_server]:
                         channel_info = ChannelInfo(
                             channel_id=channel['id'],
                             channel_name=channel['name'],
@@ -348,30 +367,37 @@ class DiscordService:
                         channel_info.last_checked = datetime.now()
                         
                         server_info.add_channel(channel_info)
+                        channels_added += 1
                         
-                        # Add to monitored channels if accessible
-                        if channel_info.http_accessible:
-                            self.monitored_announcement_channels.add(channel['id'])
-                            # НОВОЕ: Инициализируем отслеживание для polling
-                            self.last_seen_message_per_channel[channel['id']] = None
-                            self.channel_last_poll_time[channel['id']] = datetime.now()
+                        # Add to monitored channels ONLY if it's announcement
+                        if any(ann_ch['id'] == channel['id'] for ann_ch in announcement_channels):
+                            if channel_info.http_accessible:
+                                self.monitored_announcement_channels.add(channel['id'])
+                                announcement_channels_added += 1
+                                # Initialize tracking for polling
+                                self.last_seen_message_per_channel[channel['id']] = None
+                                self.channel_last_poll_time[channel['id']] = datetime.now()
                     
                     # Update server stats
                     server_info.update_stats()
                     
-                    # Store server ONLY if it has announcement channels
-                    if server_info.accessible_channel_count > 0:
-                        self.servers[guild_name] = server_info
-                        
-                        self.logger.info("Added server with announcement channels", 
-                                       guild=guild_name,
-                                       announcement_channels=len(announcement_channels),
-                                       accessible_announcement_channels=server_info.accessible_channel_count)
-                    else:
-                        self.logger.info("Skipped server - no accessible announcement channels", 
-                                       guild=guild_name)
+                    # ВАЖНО: Добавляем ВСЕ серверы, даже без announcement каналов
+                    self.servers[guild_name] = server_info
                     
-                    return
+                    if has_announcement_channels:
+                        self.logger.info("Added server WITH announcement channels", 
+                                    guild=guild_name,
+                                    total_channels=channels_added,
+                                    announcement_channels=announcement_channels_added,
+                                    accessible_channels=server_info.accessible_channel_count)
+                    else:
+                        self.logger.info("Added server WITHOUT announcement channels", 
+                                    guild=guild_name,
+                                    total_channels=channels_added,
+                                    accessible_channels=server_info.accessible_channel_count,
+                                    note="Available for manual channel addition")
+                    
+                    return has_announcement_channels
                     
             except Exception as e:
                 self.logger.error("Error processing guild", 
@@ -381,6 +407,9 @@ class DiscordService:
                 
                 if attempt < self.max_retries - 1:
                     await asyncio.sleep(self.base_delay * (2 ** attempt))
+        
+        return False
+    
     
     def _find_announcement_channels_only(self, channels: List[dict]) -> List[dict]:
         """Find announcement channels by name, type and category"""
@@ -418,6 +447,19 @@ class DiscordService:
                        by_type=sum(1 for c in announcement_channels if c.get('type') == 5),
                        by_name=sum(1 for c in announcement_channels if c.get('type') != 5))
         return announcement_channels
+    
+    def _get_accessible_channels(self, channels: List[dict]) -> List[dict]:
+        """Get all accessible channels (text channels)"""
+        accessible_channels = []
+        
+        for channel in channels:
+            channel_type = channel.get('type')
+            
+            # Only text channels (0) and announcement channels (5)
+            if channel_type in [0, 5]:
+                accessible_channels.append(channel)
+        
+        return accessible_channels
     
     async def _test_channel_access_with_retry(self, session: aiohttp.ClientSession, channel_id: str) -> bool:
         """Test channel access with retry logic"""

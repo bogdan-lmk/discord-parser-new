@@ -627,6 +627,28 @@ async def get_bot_status(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Bot status error: {str(e)}")
 
+@app.post("/telegram/bot-restart")
+async def restart_telegram_bot(
+    telegram_service: TelegramService = Depends(get_telegram_service_dependency)
+):
+    """Restart Telegram bot"""
+    try:
+        # Stop current bot if running
+        if telegram_service.bot_running:
+            telegram_service.stop_bot()
+            await asyncio.sleep(1)  # Small delay
+        
+        # Start bot again
+        await telegram_service.start_bot_async()
+        
+        return {
+            "status": "success",
+            "bot_running": telegram_service.bot_running,
+            "message": "Telegram bot restarted successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to restart bot: {str(e)}")
+
 @app.get("/servers", response_model=ServerListResponse)
 async def list_servers(
     discord_service: DiscordService = Depends(get_discord_service_dependency),
