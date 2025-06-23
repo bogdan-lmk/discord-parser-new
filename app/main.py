@@ -359,9 +359,16 @@ async def get_recent_messages(
     request: MessageRequest,
     discord_service: DiscordService = Depends(get_discord_service_dependency)
 ):
-    """ИСПРАВЛЕНО: Get recent messages from a monitored channel only"""
+    """ИСПРАВЛЕНО: Get recent messages - соблюдаем строгие лимиты"""
     try:
-        # ИСПРАВЛЕНИЕ: Проверяем что канал мониторится
+        # ИСПРАВЛЕНИЕ: Ограничиваем лимит в API
+        max_api_limit = 5  # Максимум 5 сообщений через API
+        safe_limit = min(max(1, request.limit), max_api_limit)
+        
+        if request.limit > max_api_limit:
+            discord_service.logger.warning(f"API limit exceeded: requested {request.limit}, using {safe_limit}")
+        
+        # Проверяем что канал мониторится
         if request.channel_id not in discord_service.monitored_announcement_channels:
             raise HTTPException(
                 status_code=400, 
@@ -371,7 +378,7 @@ async def get_recent_messages(
         messages = await discord_service.get_recent_messages(
             request.server_name,
             request.channel_id,
-            limit=request.limit
+            limit=safe_limit  # Используем безопасный лимит
         )
         
         # Определяем тип канала
@@ -395,12 +402,15 @@ async def get_recent_messages(
                 for msg in messages
             ],
             "count": len(messages),
+            "requested_limit": request.limit,
+            "actual_limit": safe_limit,
+            "limit_enforced": request.limit > max_api_limit,
             "server": request.server_name,
             "channel_id": request.channel_id,
             "channel_type": channel_type,
-            "note": f"Messages from this {channel_type} channel post to server topic",
+            "note": f"API enforces maximum {max_api_limit} messages per request",
             "monitoring_status": "✅ Monitored",
-            "enhanced_features": True
+            "real_time_unlimited": True
         }
         
     except HTTPException:

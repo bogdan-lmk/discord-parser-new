@@ -26,6 +26,9 @@ class MessageProcessor:
         self.telegram_service = telegram_service
         self.logger = logger or structlog.get_logger(__name__)
         
+        # Constants
+        self.INITIAL_SYNC_LIMIT = 2  # СТРОГО 2 сообщения на канал при запуске
+        
         # State management
         self.running = False
         self.start_time = datetime.now()
@@ -318,12 +321,12 @@ class MessageProcessor:
         self.logger.info("Message Processor stopped")
     
     async def _perform_initial_sync_once(self) -> None:
-        """ИСПРАВЛЕНО: Выполнить начальную синхронизацию ТОЛЬКО ОДИН РАЗ"""
+        """ИСПРАВЛЕНО: Выполнить начальную синхронизацию с СТРОГИМИ лимитами"""
         if self.initial_sync_completed:
             self.logger.warning("Initial sync already completed, skipping")
             return
             
-        self.logger.info("🚀 Starting INITIAL synchronization (last 5 messages per channel, ONCE)")
+        self.logger.info(f"🚀 Starting INITIAL synchronization with STRICT LIMIT: {self.INITIAL_SYNC_LIMIT} messages per channel")
         
         total_messages = 0
         
@@ -341,12 +344,18 @@ class MessageProcessor:
                 try:
                     self.logger.info(f"📥 Getting initial messages from channel {channel_info.channel_name} ({channel_id})")
                     
-                    # Get last 5 messages for initial sync
+                    # ИСПРАВЛЕНИЕ: СТРОГО 2 сообщения для initial sync
                     messages = await self.discord_service.get_recent_messages(
                         server_name,
                         channel_id,
-                        limit=5
+                        limit=self.INITIAL_SYNC_LIMIT  # СТРОГО соблюдаем лимит
                     )
+                    
+                    if messages:
+                        # ИСПРАВЛЕНИЕ: Дополнительная проверка лимита
+                        if len(messages) > self.INITIAL_SYNC_LIMIT:
+                            self.logger.warning(f"⚠️ Received {len(messages)} messages, truncating to {self.INITIAL_SYNC_LIMIT}")
+                            messages = messages[:self.INITIAL_SYNC_LIMIT]
                     
                     if messages:
                         # Сортируем по времени (старые -> новые)
@@ -363,7 +372,7 @@ class MessageProcessor:
                         latest_message = max(messages, key=lambda x: x.timestamp)
                         self.last_processed_message_per_channel[channel_id] = latest_message.timestamp
                         
-                        self.logger.info(f"✅ Channel {channel_info.channel_name}: {len(messages)} messages, latest: {latest_message.timestamp.isoformat()}")
+                        self.logger.info(f"✅ Channel {channel_info.channel_name}: {len(messages)}/{self.INITIAL_SYNC_LIMIT} messages (LIMIT ENFORCED), latest: {latest_message.timestamp.isoformat()}")
                     else:
                         # Даже если сообщений нет, отмечаем канал как инициализированный
                         self.last_processed_message_per_channel[channel_id] = datetime.now()
@@ -401,11 +410,13 @@ class MessageProcessor:
         
         self.stats.messages_processed_total += total_messages
         
-        self.logger.info("🎉 INITIAL synchronization COMPLETED - now monitoring only NEW messages",
+        self.logger.info("🎉 INITIAL synchronization COMPLETED with STRICT LIMITS",
                         total_messages=total_messages,
                         servers_synced=len([s for s in self.discord_service.servers.values() 
                                           if s.status == ServerStatus.ACTIVE]),
-                        initialized_channels=len(self.channel_initialization_done))
+                        initialized_channels=len(self.channel_initialization_done),
+                        message_limit_per_channel=self.INITIAL_SYNC_LIMIT,
+                        limits_enforced=True)
     
     async def _realtime_message_processor_loop(self) -> None:
         """Real-time message processing loop - только НОВЫЕ сообщения"""
